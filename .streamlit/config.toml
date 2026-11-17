@@ -1,17 +1,18 @@
+# Tema claro, o mesmo dos painéis de TB e hanseníase (src/theme/).
+[theme]
+base = "light"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F6F8"
+textColor = "#0B1220"
+primaryColor = "#1E73BE"
+
 [server]
+headless = true
 fileWatcherType = "none"
 runOnSave = false
-maxUploadSize = 50
-maxMessageSize = 400
+# O endereço público é painel.cenarios.unb.br/cenarios/demografico/.
 baseUrlPath = "cenarios/demografico"
 
 [client]
-toolbarMode = "viewer"
-
-[theme]
-base = "dark"
-backgroundColor = "#0d1117"
-secondaryBackgroundColor = "#161b22"
-textColor = "#c9d1d9"
-primaryColor = "#58a6ff"
-font = "sans serif"
+# Sem o botão "Deploy" nem o menu de desenvolvedor na tela pública.
+toolbarMode = "minimal"

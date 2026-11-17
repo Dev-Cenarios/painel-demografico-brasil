@@ -1,10 +1,15 @@
-# Intenção: as dependências diretas do painel.
-#
-# Estas quatro já estavam pinadas e batem exatamente com o que roda na VM.
-# O que faltava eram as 34 transitivas (altair, numpy, protobuf, pillow…),
-# que o pip resolvia livremente a cada build — é o que requirements.lock.txt
-# passa a fixar. O Dockerfile instala do lock, não daqui.
-streamlit==1.45.1
-pandas==2.2.2
-plotly==5.24.1
-pyarrow==16.1.0
+# O que o painel usa diretamente. As versões exatas ficam em
+# requirements.lock.txt, e é dele que o Dockerfile instala.
+
+# Mapa (deck.gl), gráficos (ECharts) e contenção de falha: o núcleo comum dos
+# painéis Cenários, em versão fixa. O wheel mora em vendor/.
+./vendor/cenarios_core-0.19.0-py3-none-any.whl
+
+streamlit==1.61.1
+pandas>=2.2
+pyarrow>=16
+# lê o parquet do IBGE e faz as contas
+duckdb>=1.1
+# as malhas do mapa (geo/)
+geopandas>=1.0
+shapely>=2.0

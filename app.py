@@ -1,293 +1,398 @@
-"""
-app.py — Dashboard Demográfico Brasil (Streamlit + Plotly).
+"""Painel Demográfico do Brasil. Aqui só monta a tela; as contas ficam em src/."""
 
-Distribuição etária, proporção de idosos e evolução populacional por
-estado, a partir das Projeções de População do IBGE (2010-2025).
-"""
+from __future__ import annotations
 
 import streamlit as st
+from cenarios_core import grafico_componente, mapa, mapa_componente, resiliencia
 
-from src.themes import THEMES, _css, inject_toggle
-from src.data import anos_disponiveis, carregar_dados, carregar_evolucao, carregar_geojson
-from src.charts import processar_dados, fig_mapa, fig_pizza, fig_piramide, fig_ranking, fig_evolucao
-from src.utils import PLOTLY_CFG, REGIOES, _fmt, _delta_html, kpi_card, section_header, html_top5
+from src import dados, estilo, graficos
+from src import indicadores as ind
 
-# ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Dashboard Demográfico | UF",
-    page_icon="🗺️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+TERRITORIO = "Brasil"
+
+st.set_page_config(page_title="Painel Demográfico do Brasil", layout="wide")
+st.markdown(estilo.css(), unsafe_allow_html=True)
+
+# Brasil é quase quadrado, então o mapa é alto.
+ALTURA_MAPA = 540
+TOPO_RANKING = 10
+# Quintis primeiro: com 5.571 municípios, densidade e crescimento têm pontas
+# tão longas que as quebras naturais deixam quase tudo numa cor só.
+CLASSIFICACOES = {"QUARTIL": "Quintis", "NATURAL": "Quebras naturais"}
+NIVEIS = {"UF": "Estados", "MUN": "Municípios"}
 
 
-# ── Warmup: pré-aquece cache na inicialização ──────────────────────────────
+# ---------------------------------------------------------------------------
+# Dados (com cache)
+# ---------------------------------------------------------------------------
+
 @st.cache_resource(show_spinner=False)
-def _iniciar_warmup():
-    """Roda uma vez por processo — pré-carrega dados mais comuns em background."""
-    import threading
-    def _bg():
-        """Alvo da thread de warmup: pré-carrega geojson, evolução e o ano mais recente."""
-        try:
-            from src.data import carregar_dados, carregar_evolucao, carregar_geojson
-            carregar_geojson()
-            carregar_evolucao()
-            anos = anos_disponiveis()
-            if anos:
-                carregar_dados(anos[0])
-        except Exception:
-            pass
-    threading.Thread(target=_bg, daemon=True).start()
-    return True
-_iniciar_warmup()
-# ───────────────────────────────────────────────────────────────────────────
+def _geometrias_ufs():
+    return mapa.geometrias_geojson(dados.ufs())
 
-if "theme" not in st.session_state:
-    st.session_state.theme = "light"
 
-GEOJSON = carregar_geojson()
-_anos   = anos_disponiveis()
+@st.cache_resource(show_spinner=False)
+def _geometrias_brasil():
+    # a malha não muda, só a cor
+    return mapa.geometrias_geojson(dados.territorio())
 
-# ── Dados carregados antes da sidebar ─────────────────────────────────────────
-# Carrega com ano padrão para ter ufs_disponiveis na sidebar
-_ano_default = st.session_state.get("ano_sel", _anos[0])
-_df_default  = carregar_dados(_ano_default)
-_ufs_disp    = sorted(_df_default["uf"].unique().tolist())
 
-# ── Callbacks ────────────────────────────────────────────────────────────────
-def _on_regiao_change():
-    """Callback do selectbox de região — preenche o multiselect de UFs.
+@st.cache_resource(show_spinner=False)
+def _geometrias_da_uf(uf: str):
+    return mapa.geometrias_geojson(dados.municipios_da_uf(uf))
 
-    Disparado quando o usuário escolhe uma região; substitui a seleção
-    atual do multiselect (`ms_ufs`) pelas UFs daquela região.
-    """
-    regiao = st.session_state.get("sel_regiao", "— nenhum —")
-    st.session_state["ms_ufs"] = (
-        [u for u in REGIOES.get(regiao, []) if u in _ufs_disp]
-        if regiao != "— nenhum —" else []
-    )
 
-def _on_todos_change():
-    """Callback do checkbox "Todos os estados" — limpa a seleção ao desmarcar.
+@st.cache_data(show_spinner=False)
+def _kpis(ano: int, recorte: str | None):
+    return dados.kpis(ano, recorte)
 
-    Ao desmarcar, esvazia o multiselect de UFs para o usuário escolher um
-    subconjunto explicitamente (em vez de manter a seleção anterior).
-    """
-    if not st.session_state.get("chk_todos", True):
-        st.session_state["ms_ufs"] = []
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.divider()
+@st.cache_data(show_spinner=False)
+def _valores(metrica: str, ano: int, nivel: str, uf: str | None = None):
+    return dados.valores(metrica, ano, nivel, uf)
 
-    ano_sel = st.selectbox("📅 Ano de referência", options=_anos, index=0, key="ano_sel")
-    ano_ant = _anos[_anos.index(ano_sel) + 1] if _anos.index(ano_sel) + 1 < len(_anos) else None
 
-    st.divider()
-    st.markdown("**🗺️ Estados**")
+@st.cache_data(show_spinner=False)
+def _serie(recorte: str | None):
+    return dados.serie(recorte)
 
-    todos = st.checkbox("Todos os estados", value=True, key="chk_todos", on_change=_on_todos_change)
 
-    if not todos:
-        regiao_atual = st.session_state.get("sel_regiao", "— nenhum —")
-        st.selectbox(
-            "Filtrar por região:",
-            options=["— nenhum —"] + list(REGIOES.keys()),
-            key="sel_regiao",
-            on_change=_on_regiao_change,
-        )
-        regiao_atual = st.session_state.get("sel_regiao", "— nenhum —")
+@st.cache_data(show_spinner=False)
+def _piramide(ano: int, recorte: str | None, proporcao: bool):
+    return dados.piramide(ano, recorte, proporcao)
 
-        if regiao_atual != "— nenhum —":
-            _ufs_regiao = [u for u in REGIOES.get(regiao_atual, []) if u in _ufs_disp]
-            st.markdown(
-                f"<div style='background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.3);"
-                f"border-radius:8px;padding:8px 12px;font-size:.82rem;color:#58a6ff;margin-top:4px'>"
-                f"📍 <b>{regiao_atual}</b> · {len(_ufs_regiao)} estados</div>",
-                unsafe_allow_html=True,
-            )
-            ufs_sel = _ufs_regiao
-        else:
-            ufs_sel = st.multiselect(
-                "Estados:",
-                options=_ufs_disp,
-                key="ms_ufs",
-                placeholder="Selecione estados...",
-            )
-            if not ufs_sel:
-                ufs_sel = _ufs_disp
+
+@st.cache_data(show_spinner=False)
+def _ranking(metrica: str, ano: int, nivel: str, uf: str | None):
+    return dados.ranking(metrica, ano, nivel, uf)
+
+
+# ---------------------------------------------------------------------------
+# Recorte selecionado e cliques
+# ---------------------------------------------------------------------------
+
+anos = dados.anos()
+if "selecionado" not in st.session_state:
+    st.session_state.selecionado = None
+
+# o seletor vem depois, mas o valor já está no estado
+por_estado = st.session_state.get("visao_mapa", "UF") == "UF"
+
+
+def _clicar(alvo: str) -> None:
+    """Clicar de novo no selecionado volta um nível."""
+    atual = st.session_state.selecionado
+    if alvo != atual:
+        st.session_state.selecionado = alvo
     else:
-        ufs_sel = _ufs_disp
+        st.session_state.selecionado = dados.uf_de(atual) if por_estado and not dados.eh_uf(atual) else None
 
-    st.divider()
-    filtrar_idosos_pizza = False  # definido abaixo no card
 
-# ── Tema ──────────────────────────────────────────────────────────────────────
-t = THEMES[st.session_state.theme]
-st.markdown(_css(t), unsafe_allow_html=True)
+# Lê os cliques antes de desenhar.
+for _comp, _nonce, _ler in (
+    ("mapa", "clique_mapa", mapa_componente.alvo_do_clique),
+    ("ranking", "clique_ranking", grafico_componente.alvo_do_clique),
+):
+    _alvo, _novo = _ler(st.session_state.get(_comp), st.session_state.get(_nonce))
+    if _novo:
+        st.session_state[_nonce] = _novo
+    if _alvo:
+        _clicar(str(_alvo))
 
-st.markdown("<style>iframe[height='50']{display:none!important;margin:0;padding:0;height:0!important}</style>", unsafe_allow_html=True)
-inject_toggle()
-if st.session_state.theme == "light":
-    st.markdown("""
-    <div class="cenarios-bar">
-      <span class="cenarios-bar-logo">Cenários<span>+</span></span>
-      <span class="cenarios-bar-sep">|</span>
-      <span class="cenarios-bar-title">Dashboard Demográfico</span>
-    </div>
-    """, unsafe_allow_html=True)
+selecionado = st.session_state.selecionado
+local = dados.nome(selecionado, TERRITORIO)
+# a UF cujos municípios o mapa está mostrando
+uf_aberta = dados.uf_de(selecionado) if por_estado else None
 
-# ── Dados ─────────────────────────────────────────────────────────────────────
-df_raw             = carregar_dados(ano_sel)
-df_proc, df_idosos = processar_dados(df_raw)
-df_evo             = carregar_evolucao()
+ano = st.session_state.get("ano")
+ano = ano if ano in anos else anos[-1]
+serie_local = _serie(selecionado)
 
-df_ant                     = carregar_dados(ano_ant) if ano_ant else None
-df_proc_ant, df_idosos_ant = processar_dados(df_ant) if df_ant is not None else (None, None)
 
-pop_total = int(df_proc["populacao"].sum())
-n_ufs     = df_proc["uf"].nunique()
+# ---------------------------------------------------------------------------
+# Cabeçalho e cards
+# ---------------------------------------------------------------------------
 
-with st.sidebar:
-    st.caption(f"📊 **{_fmt(pop_total)}** hab. · **{len(ufs_sel)}** de {n_ufs} estados · IBGE {ano_sel}")
+st.markdown(estilo.cabecalho("Painel Demográfico do Brasil", f"{local} • {ano}"), unsafe_allow_html=True)
 
-# ── Métricas filtradas ────────────────────────────────────────────────────────
-df_filt    = df_proc[df_proc["uf"].isin(ufs_sel)]
-df_id_filt = df_idosos[df_idosos["uf"].isin(ufs_sel)]
+atuais = _kpis(ano, selecionado)
+anteriores = _kpis(ano - 1, selecionado) if ano - 1 in anos else {}
+with st.container(key="faixa-kpis"):
+    for coluna, m in zip(st.columns(len(ind.LAYOUT_KPI)), ind.LAYOUT_KPI, strict=True):
+        with coluna, resiliencia.painel(ind.rotulo(m, curto=True)):
+            valor = atuais.get(m)
+            ano_card, anterior = ano, anteriores.get(m)
+            ultimo_sinasc = (dados.anos_nascimentos() or [None])[-1]
+            if m in ind.NASCIMENTOS and valor is None and ultimo_sinasc and ano > ultimo_sinasc:
+                # o SINASC fecha depois da população: o card mostra o último ano fechado
+                ano_card = ultimo_sinasc
+                valor = _kpis(ano_card, selecionado).get(m)
+                anterior = _kpis(ano_card - 1, selecionado).get(m)
+            texto = estilo.formatar(valor, ind.casas(m)) + (ind.sufixo(m) if valor is not None else "")
+            if m == "crescimento" and valor is not None and valor > 0:
+                texto = "+" + texto
+            if valor is not None and ano_card != ano:
+                subtitulo = f"{local} • {ano_card} (SINASC)"
+            elif valor is not None:
+                subtitulo = f"{local} • {ano}"
+            elif m in ind.NASCIMENTOS:
+                anos_sinasc_card = dados.anos_nascimentos()
+                subtitulo = f"SINASC vai até {anos_sinasc_card[-1]}" if anos_sinasc_card else "sem o SINASC"
+            else:
+                subtitulo = f"sem o ano anterior a {ano}"
+            if m == "esperanca_vida" and valor is not None:
+                # o IBGE publica por estado: deixar claro quando não é o número do próprio recorte
+                if dados.esperanca_estimada(selecionado):
+                    subtitulo = f"média dos estados • {ano}"
+                elif dados.esperanca_herdada(selecionado):
+                    subtitulo = f"valor de {dados.uf_de(selecionado)} • {ano}"
+            st.markdown(estilo.card(
+                ind.rotulo(m), texto, ind.cor(m),
+                subtitulo=subtitulo,
+                variacao_html=estilo.variacao(valor, anterior, casas=ind.casas(m),
+                                              ano_anterior=ano_card - 1, relativa=m == "populacao",
+                                              sufixo=ind.sufixo(m)),
+                icone=ind.icone(m), ajuda=ind.ajuda(m),
+            ), unsafe_allow_html=True)
 
-pop_filt       = int(df_filt["populacao"].sum())
-pct_fem_filt   = (df_filt[df_filt["sexo"] == "F"]["populacao"].sum() / pop_filt * 100) if pop_filt else 0
-pct_idog_filt  = (df_filt[df_filt["idade"] >= 60]["populacao"].sum() / pop_filt * 100) if pop_filt else 0
-idade_med_filt = ((df_filt["idade"] * df_filt["populacao"]).sum() / pop_filt) if pop_filt else 0
 
-if df_proc_ant is not None:
-    df_filt_ant  = df_proc_ant[df_proc_ant["uf"].isin(ufs_sel)]
-    pop_ant      = int(df_filt_ant["populacao"].sum())
-    pct_idog_ant = (df_filt_ant[df_filt_ant["idade"] >= 60]["populacao"].sum() / pop_ant * 100) if pop_ant else 0
-    pct_fem_ant  = (df_filt_ant[df_filt_ant["sexo"] == "F"]["populacao"].sum() / pop_ant * 100) if pop_ant else 0
-    idade_ant    = ((df_filt_ant["idade"] * df_filt_ant["populacao"]).sum() / pop_ant) if pop_ant else 0
+# ---------------------------------------------------------------------------
+# Controles
+# ---------------------------------------------------------------------------
+
+def _trocar_tema() -> None:
+    """Trocou o tema: a métrica vai para a primeira dele."""
+    tema_novo = st.session_state.get("tema") or "estrutura"
+    st.session_state["metrica"] = ind.TEMAS[tema_novo][1][0]
+
+
+# quem chega com uma métrica (link, teste) cai no tema dela
+if st.session_state.get("metrica") in ind.METRICAS_MAPA and "tema" not in st.session_state:
+    st.session_state["tema"] = next(t for t, (_, ms) in ind.TEMAS.items() if st.session_state["metrica"] in ms)
+
+with st.container(border=True, key="cartao-controles"):
+    col_ano, col_tema, col_metrica, col_nivel, col_cores = st.columns([1, 2.6, 4, 1.6, 1.8],
+                                                                      vertical_alignment="top")
+    col_ano.selectbox("Ano", anos[::-1], key="ano")
+    tema = col_tema.segmented_control(
+        "Tema", list(ind.TEMAS), format_func=lambda t: ind.TEMAS[t][0], default="estrutura", key="tema",
+        on_change=_trocar_tema,
+    ) or "estrutura"
+    metricas_tema = ind.TEMAS[tema][1]
+    if st.session_state.get("metrica") not in metricas_tema:
+        st.session_state["metrica"] = metricas_tema[0]
+    metrica = col_metrica.segmented_control(
+        "Métrica do mapa", metricas_tema, format_func=lambda m: ind.rotulo(m, curto=True),
+        key="metrica",
+    ) or metricas_tema[0]
+    col_nivel.segmented_control("Nível do mapa", list(NIVEIS), format_func=NIVEIS.get, default="UF",
+                                key="visao_mapa", on_change=lambda: st.session_state.update(selecionado=None),
+                                disabled=ind.so_estados(metrica),
+                                help="Esta métrica só existe por estado." if ind.so_estados(metrica) else None)
+    regua = ind.regua(metrica)
+    if regua:
+        # crescimento (o zero) e fecundidade (a reposição, 2,1) têm régua própria:
+        # o ponto que dá sentido ao número não pode mudar de lugar entre anos
+        col_cores.caption("Cores: régua fixa, igual em todo ano.")
+        classificacao = "FIXA"
+    else:
+        classificacao = col_cores.segmented_control(
+            "Cores", list(CLASSIFICACOES), format_func=CLASSIFICACOES.get, default="QUARTIL",
+            key="classificacao",
+        ) or "QUARTIL"
+
+# métrica que só existe por estado (esperança de vida): o mapa fica nos 27
+if ind.so_estados(metrica):
+    uf_aberta = None
+# só os 27 estados quando nenhum está aberto
+estados = ind.so_estados(metrica) or (por_estado and uf_aberta is None)
+casas, rotulo, rotulo_curto = ind.casas(metrica), ind.rotulo(metrica), ind.rotulo(metrica, curto=True)
+onde = f" em {dados.nome_uf(uf_aberta)}" if uf_aberta else ""
+regua_mapa = {"cortes_fixos": regua["cortes"], "nomes_fixos": regua["nomes"], "casas_regua": 1} if regua else {}
+anos_sinasc = dados.anos_nascimentos()
+# O SINASC fecha depois da população: num ano que ele ainda não tem, o mapa e
+# o ranking de nascimentos vão para o último ano fechado (e o título diz qual).
+ano_m = anos_sinasc[-1] if metrica in ind.NASCIMENTOS and anos_sinasc and ano > anos_sinasc[-1] else ano
+sem_sinasc_no_ano = metrica in ind.NASCIMENTOS and ano_m not in anos_sinasc
+
+if estados:
+    valores = _valores(metrica, ano_m, "UF")
+    populacao = _valores("populacao", ano, "UF")
 else:
-    pop_ant = pct_idog_ant = pct_fem_ant = idade_ant = 0
+    valores = _valores(metrica, ano_m, "MUN", uf_aberta)
+    populacao = _valores("populacao", ano, "MUN", uf_aberta)
+escala = mapa.escala(valores, ind.rampa(metrica), metodo=classificacao, decimais=casas, **regua_mapa)
 
-# ── Hero ──────────────────────────────────────────────────────────────────────
-_label_ufs = (
-    "Todos os estados" if len(ufs_sel) == n_ufs
-    else f"{len(ufs_sel)} estado{'s' if len(ufs_sel) > 1 else ''} selecionado{'s' if len(ufs_sel) > 1 else ''}"
-)
 
-st.markdown(f"""
-<div class="hero">
-  <h1 class="hero-title">🗺️ Dashboard Demográfico — Brasil</h1>
-  <p class="hero-subtitle">
-    Análise demográfica com distribuição etária, proporção de idosos,
-    pirâmide populacional e evolução histórica por estado.
-  </p>
-  <div class="hero-badges">
-    <span class="hero-badge accent"><span class="dot"></span>{_label_ufs}</span>
-    <span class="hero-badge success"><span class="dot"></span>{_fmt(pop_filt)} pessoas</span>
-    <span class="hero-badge"><span class="dot"></span>IBGE · {ano_sel}</span>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+# ---------------------------------------------------------------------------
+# Mapa
+# ---------------------------------------------------------------------------
 
-# ── KPIs ──────────────────────────────────────────────────────────────────────
-kpi_items = [
-    ("👥", "População total",     _fmt(pop_filt),             f"{len(ufs_sel)} estado(s)",
-     _delta_html(pop_filt, pop_ant),            "blue"),
-    ("👴", "Proporção de idosos", f"{pct_idog_filt:.1f}%",    "≥ 60 anos",
-     _delta_html(pct_idog_filt, pct_idog_ant),  "orange"),
-    ("♀️", "Proporção feminina",  f"{pct_fem_filt:.1f}%",     "sobre o total",
-     _delta_html(pct_fem_filt, pct_fem_ant),    "purple"),
-    ("📅", "Idade média",         f"{idade_med_filt:.1f} anos","média ponderada",
-     _delta_html(idade_med_filt, idade_ant),    "green"),
-]
+col_mapa, col_graficos = st.columns([1.05, 1], gap="medium")
 
-cols = st.columns(4)
-for col, (icon, title, value, sub, delta, color) in zip(cols, kpi_items):
-    with col:
-        st.markdown(kpi_card(title, value, sub, icon, delta, color), unsafe_allow_html=True)
-
-st.markdown("<div style='margin-bottom:8px'></div>", unsafe_allow_html=True)
-st.divider()
-
-# ── 01 · Mapa + 02 · Top 5 ───────────────────────────────────────────────────
-col_mapa, col_top5 = st.columns([3, 2])
-
-with col_mapa:
-    st.markdown(section_header("01", "Proporção de Idosos por Estado",
-        "Percentual da população com 60 anos ou mais em cada estado."), unsafe_allow_html=True)
-    try:
-        st.plotly_chart(fig_mapa(df_id_filt, t, GEOJSON), use_container_width=True, config=PLOTLY_CFG)
-    except Exception:
-        import plotly.express as px
-        from src.utils import H_LARGE
-        from src.charts import _apply_layout as _al
-        fig_bar = px.bar(
-            df_id_filt.sort_values("pct_idosos"), x="pct_idosos", y="uf",
-            orientation="h", color="pct_idosos", color_continuous_scale="YlOrRd",
-        )
-        _al(fig_bar, t, H_LARGE)
-        fig_bar.update_layout(coloraxis_showscale=False)
-        st.plotly_chart(fig_bar, use_container_width=True, config=PLOTLY_CFG)
-
-with col_top5:
-    st.markdown(section_header("02", "Top estados — % de idosos",
-        "Estados com maior proporção de pessoas com 60 anos ou mais."), unsafe_allow_html=True)
-    top_n = min(15, len(df_id_filt))
-    top15 = (
-        df_id_filt[["uf", "pct_idosos", "idosos"]]
-        .sort_values("pct_idosos", ascending=False).head(top_n)
-        .rename(columns={"uf": "UF", "pct_idosos": "% Idosos", "idosos": "Idosos"})
-        .reset_index(drop=True)
+with col_mapa, resiliencia.painel("Mapa"), st.container(border=True, key="cartao-mapa"):
+    st.markdown(estilo.titulo_bloco(f"Mapa — {rotulo}{onde}, {ano_m}", ajuda=ind.ajuda(metrica)),
+                unsafe_allow_html=True)
+    if estados:
+        camada, chave, nome, geometrias, divisas = dados.ufs(), "uf", "nome_uf", _geometrias_ufs(), None
+    elif uf_aberta:
+        camada, chave, nome = dados.municipios_da_uf(uf_aberta), "cod_mun6", "nome_mun"
+        geometrias, divisas = _geometrias_da_uf(uf_aberta), None
+    else:
+        camada, chave, nome = dados.territorio(), "cod_mun6", "nome_mun"
+        geometrias, divisas = _geometrias_brasil(), _geometrias_ufs()
+    desenho, escala_mapa = mapa.deck(
+        camada, valores, chave=chave, coluna_nome=nome, rampa=ind.rampa(metrica),
+        rotulo_metrica=rotulo, decimais=casas, altura=ALTURA_MAPA, geometrias=geometrias,
+        destacado=None if dados.eh_uf(selecionado) or estados else selecionado, metodo=classificacao,
+        detalhes=[("População", populacao, ind.cor("populacao"), 0)],
+        divisas=divisas, quadro_ilhas=False, **regua_mapa,
     )
-    top15["% Idosos"] = top15["% Idosos"].map("{:.2f}%".format)
-    top15["Idosos"]   = top15["Idosos"].map("{:,.0f}".format)
-    st.markdown(html_top5(top15, t), unsafe_allow_html=True)
+    mapa_componente.desenhar(desenho, altura=ALTURA_MAPA, key="mapa", titulo=f"Mapa do Brasil: {rotulo}")
+    contagem = mapa.classificar(valores.reindex(camada[chave]), escala_mapa).value_counts()
+    st.markdown(mapa.legenda(escala_mapa, rotulo_curto, contagem=contagem,
+                             nomes=regua["nomes"] if regua else None), unsafe_allow_html=True)
+    if ind.so_estados(metrica):
+        st.caption("O IBGE publica a esperança de vida por estado, não por município. "
+                   "Projeções da População, revisão 2024.")
+    if ano_m != ano:
+        st.caption(f"O SINASC vai de {anos_sinasc[0]} a {anos_sinasc[-1]}: {ano} ainda não foi fechado "
+                   f"pelo DATASUS, então o mapa mostra {ano_m}.")
+    elif sem_sinasc_no_ano:
+        st.caption(f"O SINASC não tem {ano}.")
+    elif metrica in ind.NASCIMENTOS and not estados:
+        st.caption("Em município pequeno, poucos nascimentos a mais ou a menos mudam muito a taxa: "
+                   "compare com os anos vizinhos.")
+    if metrica == "crescimento" and ano == anos[0]:
+        st.caption(f"{anos[0]} é o primeiro ano da base: não há ano anterior para medir o crescimento.")
+    if uf_aberta and not dados.eh_uf(selecionado):
+        st.button(f"Ver {dados.nome_uf(uf_aberta)} inteiro",
+                  on_click=lambda: st.session_state.update(selecionado=uf_aberta))
+    if selecionado:
+        st.button(f"Ver {TERRITORIO} inteiro", on_click=lambda: st.session_state.update(selecionado=None))
+    elif estados:
+        st.caption("Clique num estado para abrir os municípios dele.")
+    else:
+        st.caption("Clique num município para ver os números dele.")
 
-st.divider()
 
-# ── 03 · Distribuição por Sexo + 04 · Pirâmide Etária ────────────────────────
-col_pizza, col_piramide = st.columns([1, 1], gap="large")
+# ---------------------------------------------------------------------------
+# Gráficos ao lado do mapa
+# ---------------------------------------------------------------------------
 
-with col_pizza:
-    st.markdown(section_header("03", "Distribuição por Sexo"), unsafe_allow_html=True)
-    filtrar_idosos_pizza = st.toggle("Apenas ≥ 60 anos", value=False)
-    st.plotly_chart(fig_pizza(df_filt, t, filtrar_idosos_pizza), use_container_width=True, config=PLOTLY_CFG)
+with col_graficos, st.container(border=True, key="cartao-graficos"):
+    aba_piramide, aba_grupos, aba_evolucao, aba_ranking = st.tabs(
+        ["Pirâmide etária", "Grupos de idade", "Evolução temporal",
+         "Ranking de estados" if estados else "Ranking de municípios"])
 
-with col_piramide:
-    st.markdown(section_header("04", "Pirâmide Etária",
-        "Distribuição por faixa de 5 anos e sexo. Base larga = pop. jovem · Topo largo = pop. envelhecida."),
-        unsafe_allow_html=True)
-    st.plotly_chart(fig_piramide(df_filt, t), use_container_width=True, config=PLOTLY_CFG)
+    with aba_piramide, resiliencia.painel("Pirâmide etária"):
+        st.markdown(estilo.titulo_bloco(f"Pirâmide etária — {local}, {ano}"), unsafe_allow_html=True)
+        col_cmp, col_pct = st.columns([1.2, 1], vertical_alignment="bottom")
+        outros = [a for a in anos if a != ano]
+        ano_cmp = col_cmp.selectbox("Comparar com", [None, *outros], index=1 if outros else 0,
+                                    format_func=lambda a: "nenhum ano" if a is None else str(a),
+                                    key="ano_comparacao")
+        proporcao = col_pct.toggle("Em % da população", value=False, key="piramide_pct",
+                                   help="Deixa comparar a forma da pirâmide entre lugares e anos.")
+        grafico_componente.desenhar(
+            graficos.piramide(
+                _piramide(ano, selecionado, proporcao), rotulo="% da população" if proporcao else "Pessoas",
+                casas=2 if proporcao else 0,
+                comparacao=_piramide(ano_cmp, selecionado, proporcao) if ano_cmp else None,
+                ano_comparacao=ano_cmp,
+            ),
+            altura=ALTURA_MAPA - 110, key="piramide",
+        )
+        st.caption("Faixas de 5 anos; a última junta todo mundo com 80 anos ou mais."
+                   + (f" Barras: {ano}. Contorno: {ano_cmp}." if ano_cmp else ""))
 
-st.divider()
+    with aba_grupos, resiliencia.painel("Grupos de idade"):
+        st.markdown(estilo.titulo_bloco(f"Crianças, idade de trabalhar e idosos — {local}"),
+                    unsafe_allow_html=True)
+        grafico_componente.desenhar(graficos.grupos_por_ano(serie_local), altura=250, key="grupos")
+        st.markdown(estilo.titulo_bloco(
+            f"Razão de dependência — {local}",
+            ajuda="Quantas pessoas fora da idade de trabalhar há para cada 100 de 15 a 64 anos, "
+                  "separando crianças e idosos."), unsafe_allow_html=True)
+        grafico_componente.desenhar(graficos.dependencia_por_ano(serie_local, ano), altura=250, key="dependencia")
+        st.caption(graficos.frase_bonus(serie_local))
 
-# ── 05 · Evolução + 06 · Ranking ─────────────────────────────────────────────
-col_evo, col_rank = st.columns([1, 1], gap="large")
+    with aba_evolucao, resiliencia.painel("Evolução"):
+        st.markdown(estilo.titulo_bloco(f"{rotulo} por ano — {local}"), unsafe_allow_html=True)
+        if metrica == "esperanca_vida":
+            # homens e mulheres juntos: a diferença entre os dois é parte da história
+            grafico = grafico_componente.linhas_anuais(
+                serie_local, series={c: (ind.rotulo(c, curto=True) if c != metrica else "Total", ind.cor(c))
+                                     for c in ("esperanca_vida", "esperanca_vida_h", "esperanca_vida_m")},
+                rotulo="Anos", ano=ano, casas=1,
+            )
+            # o eixo a partir do zero achatava tudo entre 70 e 82
+            base = serie_local[["esperanca_vida_h", "esperanca_vida_m"]]
+            if base.notna().any().any():
+                grafico["yAxis"]["min"] = int(base.min().min()) - 2
+                grafico["yAxis"]["max"] = int(base.max().max()) + 2
+        elif metrica == "fecundidade":
+            # a linha da reposição é o que dá sentido ao número
+            grafico = grafico_componente.linhas_anuais(
+                serie_local.dropna(subset=["fecundidade"]), series={"fecundidade": ("Fecundidade", ind.cor(metrica))},
+                rotulo="Filhos por mulher", ano=ano, casas=2, referencias=[("Reposição: 2,1", 2.1)],
+            )
+        else:
+            base = serie_local[["ano", metrica]].rename(columns={metrica: "valor"})
+            if metrica in ind.NASCIMENTOS:
+                base = base.dropna()
+            grafico = grafico_componente.evolucao_anual(base, rotulo=rotulo_curto, cor=ind.cor(metrica), ano=ano)
+        grafico_componente.desenhar(grafico, altura=240, key="anual")
+        if metrica == "esperanca_vida" and dados.esperanca_estimada(selecionado):
+            st.caption("Brasil: média dos estados ponderada pela população, uma aproximação do "
+                       "número nacional do IBGE.")
+        # embaixo, a contagem que dá base à taxa: nascidos no tema Nascimentos, população no resto
+        contagem = "nascidos" if metrica in ind.NASCIMENTOS else "populacao"
+        pop = serie_local[["ano", contagem]].rename(columns={contagem: "valor"}).dropna()
+        # o eixo não cabe "213.000.000": vai em milhões ou em mil, conforme o lugar
+        maior = pop["valor"].max() if not pop.empty else 0
+        divisor, unidade = (1e6, "milhões") if maior >= 1e6 else (1e3, "mil") if maior >= 1e4 else (1, "")
+        nome_contagem = ind.rotulo(contagem)
+        sufixo_unidade = f" ({unidade})" if unidade else ""
+        st.markdown(estilo.titulo_bloco(f"{nome_contagem} por ano{sufixo_unidade} — {local}"),
+                    unsafe_allow_html=True)
+        grafico_componente.desenhar(
+            grafico_componente.evolucao_anual(pop.assign(valor=pop["valor"] / divisor),
+                                              rotulo=f"{nome_contagem}{sufixo_unidade}", cor=ind.cor(contagem),
+                                              ano=ano),
+            altura=220, key="anual-pop",
+        )
 
-with col_evo:
-    st.markdown(section_header("05", "Evolução Populacional — 2010 a 2025",
-        "Total de habitantes nos estados selecionados ao longo dos anos."), unsafe_allow_html=True)
-    st.plotly_chart(fig_evolucao(df_evo, ufs_sel, t), use_container_width=True, config=PLOTLY_CFG)
+    with aba_ranking, resiliencia.painel("Ranking"):
+        brasil = _kpis(ano_m, None).get(metrica)
+        referencia = ((f"Brasil: {estilo.formatar(brasil, casas)}{ind.sufixo(metrica)}", brasil)
+                      if brasil is not None else None)
+        if estados:
+            st.markdown(estilo.titulo_bloco(f"{rotulo_curto} nos estados, {ano_m}"), unsafe_allow_html=True)
+            tabela, altura_barra = _ranking(metrica, ano_m, "UF", None), 22
+        else:
+            st.markdown(estilo.titulo_bloco(
+                f"{TOPO_RANKING} municípios com maior {rotulo_curto.lower()}{onde}, {ano_m}"), unsafe_allow_html=True)
+            tabela, altura_barra = _ranking(metrica, ano_m, "MUN", uf_aberta).head(TOPO_RANKING), 34
+        grafico_componente.desenhar(
+            grafico_componente.ranking(
+                tabela, rotulo=rotulo_curto, cor=ind.cor(metrica), escala=escala,
+                selecionado=None if dados.eh_uf(selecionado) else selecionado, casas=casas,
+                largura_rotulo=170, rotulos_valor=True, sufixo=ind.sufixo(metrica), referencia=referencia,
+            ),
+            altura=max(grafico_componente.ALTURA_MIN_RANKING, altura_barra * len(tabela) + 24),
+            key="ranking",
+        )
+        st.caption("Linha tracejada: o Brasil. A cor da barra é a faixa do mapa."
+                   + ("" if estados else " Município pequeno sobe fácil no ranking: confira a população."))
 
-with col_rank:
-    st.markdown(section_header("06", "Ranking — Proporção de Idosos por Estado",
-        "Estados ordenados pela proporção de pessoas com 60+ anos."), unsafe_allow_html=True)
-    st.plotly_chart(fig_ranking(df_id_filt, t), use_container_width=True, config=PLOTLY_CFG)
 
-st.divider()
+# ---------------------------------------------------------------------------
+# Rodapé
+# ---------------------------------------------------------------------------
 
-# ── Footer ────────────────────────────────────────────────────────────────────
-st.markdown("""
-<div class="cenarios-footer" style="
-    background:#2B7BB9;
-    border-radius:12px;
-    padding:28px 36px;
-    margin-top:8px;
-">
-    <div style="font-size:1.2rem;font-weight:800;color:#ffffff;letter-spacing:-0.3px;margin-bottom:4px;">
-        Cenários<span style="color:#E07B54">+</span>
-    </div>
-    <div style="font-size:.82rem;color:rgba(255,255,255,.75);">Todos os direitos reservados.</div>
-</div>
-""", unsafe_allow_html=True)
+st.markdown(estilo.rodape(
+    f"Fonte: IBGE, população por município, sexo e idade · {anos[0]} a {anos[-1]} · "
+    "esperança de vida: IBGE, Projeções da População 2024 · nascimentos: SINASC/DATASUS"
+    + (f", {dados.anos_nascimentos()[0]} a {dados.anos_nascimentos()[-1]}" if dados.anos_nascimentos() else "")
+    + " · área calculada da malha municipal do IBGE"), unsafe_allow_html=True)
