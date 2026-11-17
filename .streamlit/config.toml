@@ -1,0 +1,17 @@
+[server]
+fileWatcherType = "none"
+runOnSave = false
+maxUploadSize = 50
+maxMessageSize = 400
+baseUrlPath = "cenarios/demografico"
+
+[client]
+toolbarMode = "viewer"
+
+[theme]
+base = "dark"
+backgroundColor = "#0d1117"
+secondaryBackgroundColor = "#161b22"
+textColor = "#c9d1d9"
+primaryColor = "#58a6ff"
+font = "sans serif"
