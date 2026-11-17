@@ -1,12 +1,5 @@
 name: CI
 
-# Este painel não tem suíte de testes, então o CI cobre o que dá para verificar
-# sem ela: o código passa no linter, a imagem constrói, e o que ela instala é
-# exatamente o que está no lock.
-#
-# O que NÃO é coberto: se um número do painel está certo. Isso continua
-# dependendo de olhar o painel — ver a ressalva no README.
-
 on:
   push:
     branches: [main]
@@ -14,31 +7,32 @@ on:
     branches: [main]
 
 jobs:
-  lint:
+  testes:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      # 3.11 porque é a da imagem de produção (python:3.11-slim).
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-
-      - run: pip install ruff==0.16.2
-      - run: ruff check .
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.lock.txt
+      # As versões exatas que vão para a imagem — o cenarios-core sai de vendor/.
+      - name: Instala o lock
+        run: pip install -r requirements.lock.txt ruff
+      - name: Ruff (só as regras que pegam bug)
+        run: ruff check --select F app.py src tests scripts
+      - name: Testes
+        run: python -m pytest -q -rs
 
   imagem:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Constrói a imagem
-        run: docker build -t demografico:ci .
-
-      # O `tr -d '\r'` não é supérfluo: quem commita do Windows pode gravar o
-      # lock com CRLF, e aí o diff acusa todas as linhas como diferentes.
-      - name: Confere que a imagem tem as versões do lock
+        run: docker build -t painel:ci .
+      # `--entrypoint`: a imagem tem o Streamlit como ENTRYPOINT; sem isto o
+      # comando vira argumento do servidor, que sobe e fica no ar até o runner
+      # cancelar o job.
+      - name: A imagem carrega o cenarios-core com mapa e gráficos
         run: |
-          docker run --rm --entrypoint pip demografico:ci freeze | tr -d '\r' | sort -f > /tmp/imagem.txt
-          grep -v '^#' requirements.lock.txt | grep -v '^$' | tr -d '\r' | sort -f > /tmp/lock.txt
-          diff /tmp/lock.txt /tmp/imagem.txt
+          docker run --rm --entrypoint python painel:ci -c "import cenarios_core.mapa_componente as m, cenarios_core.grafico_componente as g; assert (m.DIRETORIO / 'deck.min.js').is_file() and (g.DIRETORIO / 'echarts.min.js').is_file()"

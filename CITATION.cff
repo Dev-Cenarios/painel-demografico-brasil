@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "Se usar este painel ou o seu código, cite-o como abaixo."
 type: software
 title: "Painel Demográfico — Brasil"
-abstract: "Painel da distribuição etária e do envelhecimento da população brasileira por estado, de 2010 a 2025, a partir das Projeções de População do IBGE."
+abstract: "Painel da população brasileira por estado e município, de 2010 a 2025: estrutura por idade e sexo, crescimento, densidade, nascimentos e fecundidade (SINASC/DATASUS) e esperança de vida (IBGE)."
 authors:
   - given-names: Matheus
     family-names: Cardoso
@@ -12,6 +12,8 @@ url: "https://painel.cenarios.unb.br/cenarios/demografico/"
 license: MIT
 keywords:
   - demografia
-  - envelhecimento populacional
+  - pirâmide etária
+  - fecundidade
+  - SINASC
   - IBGE
   - Brasil
